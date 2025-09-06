@@ -1,28 +1,27 @@
 package main
 
 import (
-	"flag"
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 )
 
 func main() {
-	// take port from CLI flag
-	port := flag.String("port", "8081", "server port")
-	flag.Parse()
+	if len(os.Args) < 2 {
+		log.Fatal("Port required: go run backend/main.go :8081")
+	}
+	port := os.Args[1]
+
+	http.HandleFunc("/hello", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, "Hello from backend %s\n", port)
+	})
 
 	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("OK"))
+		fmt.Fprintf(w, "OK")
 	})
 
-	http.HandleFunc("/hello", func(w http.ResponseWriter, r *http.Request) {
-		msg := fmt.Sprintf("Hello from backend server on port %s\n", *port)
-		w.Write([]byte(msg))
-	})
-
-	addr := fmt.Sprintf(":%s", *port)
-	log.Printf("Backend server started on %s\n", addr)
-	log.Fatal(http.ListenAndServe(addr, nil))
+	fmt.Printf("✅ Backend server running on %s\n", port)
+	log.Fatal(http.ListenAndServe(port, nil))
 }

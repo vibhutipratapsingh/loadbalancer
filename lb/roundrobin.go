@@ -4,21 +4,24 @@ import (
 	"sync/atomic"
 )
 
-// RoundRobin struct manages a list of backends and an atomic counter
+// RoundRobin uses an atomic counter + health checker
 type RoundRobin struct {
-	backends []string
-	counter  uint64
+	hc      *HealthChecker
+	counter uint64
 }
 
-// NewRoundRobin creates a new RoundRobin instance
-func NewRoundRobin(backends []string) *RoundRobin {
-	return &RoundRobin{
-		backends: backends,
+// NewRoundRobin creates RoundRobin with health checking
+func NewRoundRobin(hc *HealthChecker) *RoundRobin {
+	return &RoundRobin{hc: hc}
+}
+
+// NextBackend picks the next healthy backend.
+// Returns false if none available.
+func (rr *RoundRobin) NextBackend() (string, bool) {
+	backends := rr.hc.HealthyBackends()
+	if len(backends) == 0 {
+		return "", false // all servers down
 	}
-}
-
-// NextBackend returns the next backend in round robin order
-func (rr *RoundRobin) NextBackend() string {
 	idx := atomic.AddUint64(&rr.counter, 1)
-	return rr.backends[(idx-1)%uint64(len(rr.backends))]
+	return backends[(idx-1)%uint64(len(backends))], true
 }
