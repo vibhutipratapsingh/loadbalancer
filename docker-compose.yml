@@ -1,0 +1,26 @@
+version: "3.8"
+
+services:
+  lb:
+    build:
+      context: .
+      dockerfile: cmd/lb/Dockerfile
+    ports:
+      - "8080:8080" # host:container
+    environment:
+      # IMPORTANT: Use the service name 'backend' and port 8081.
+      # Docker DNS will round-robin among backend containers.
+      BACKENDS: "http://backend:8081"
+    depends_on:
+      - backend
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    # don't publish the backend port to host (we only need internal network),
+    # but expose it in the container
+    expose:
+      - "8081"
+    environment:
+      PORT: ":8081"
