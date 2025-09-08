@@ -13,12 +13,10 @@ import (
 )
 
 func main() {
-	// Read backends from env var BACKENDS (comma separated)
-	// Example: "http://backend:8081,http://backend:8081"
+	// read BACKENDS env or fallback
 	backendsEnv := os.Getenv("BACKENDS")
 	var initialBackends []string
 	if backendsEnv == "" {
-		// fallback to localhost backends for local dev
 		initialBackends = []string{
 			"http://localhost:8081",
 			"http://localhost:8082",
@@ -26,33 +24,39 @@ func main() {
 		}
 	} else {
 		for _, b := range strings.Split(backendsEnv, ",") {
-			b = strings.TrimSpace(b)
-			if b != "" {
+			if b = strings.TrimSpace(b); b != "" {
 				initialBackends = append(initialBackends, b)
 			}
 		}
 	}
 
-	// Server pool
 	pool := lb.NewServerPool(initialBackends)
 
-	// Health checker
+	// health checker (reuse your existing healthchecker implementation,
+	// but ensure it calls pool.MarkHealth(addr, healthy))
 	hc := lb.NewHealthChecker(pool)
 	hc.Start(5 * time.Second)
 
-	// Round Robin LB
-	rr := lb.NewRoundRobin(pool)
-
-	fmt.Println("🚀 Load Balancer running on :8080 (Round Robin + Server Pool)")
+	fmt.Println("🚀 Load Balancer running on :8080 (Least Connections + Health Checks)")
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		backend, ok := rr.NextBackend()
+		// Select using least-connections strategy
+		backend, ok := pool.GetLeastConnBackend()
 		if !ok {
 			http.Error(w, "No healthy backends available", http.StatusServiceUnavailable)
 			return
 		}
+
+		// increment active before forwarding
+		pool.IncActive(backend)
+		// ensure we decrement after request completes
+		defer pool.DecActive(backend)
+
+		// forward request synchronously (ForwardRequest returns after ServeHTTP completes)
 		if err := proxy.ForwardRequest(backend, w, r); err != nil {
-			http.Error(w, "Failed to forward request", http.StatusInternalServerError)
+			// forwarding failure: decrement already scheduled via defer
+			http.Error(w, "Failed to forward request", http.StatusBadGateway)
+			return
 		}
 	})
 
