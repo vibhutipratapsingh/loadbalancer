@@ -1,4 +1,3 @@
-package lb
 
 import (
 	"fmt"
@@ -9,7 +8,8 @@ import (
 // Backend represents one backend server and its runtime metrics.
 type Backend struct {
 	Addr    string // e.g. "http://localhost:8081"
-	active  int64  // active request count (access via atomic)
+	Weight  int    // relative weight (>=1)
+	active  int64  // active request count (atomic)
 	Healthy bool   // health flag (protected by pool.mu)
 }
 
@@ -18,43 +18,55 @@ func (b *Backend) Active() int64 {
 	return atomic.LoadInt64(&b.active)
 }
 
-// incActive increments active connections by 1.
 func (b *Backend) incActive() {
 	atomic.AddInt64(&b.active, 1)
 }
 
-// decActive decrements active connections by 1 (not below 0).
 func (b *Backend) decActive() {
-	// use Add with -1 to decrement
 	n := atomic.AddInt64(&b.active, -1)
 	if n < 0 {
-		// safety: reset to 0 if it ever goes negative
 		atomic.StoreInt64(&b.active, 0)
 	}
 }
 
-// ServerPool manages a set of Backend entries with concurrency safety.
+// ServerPool manages backend servers and supports weighted selection.
 type ServerPool struct {
-	mu       sync.RWMutex
-	backends map[string]*Backend // key: backend Addr
+	mu            sync.RWMutex
+	backends      map[string]*Backend // key: backend Addr
+	weightCounter uint64              // atomic counter used for weighted selection
 }
 
-// NewServerPool initializes a server pool from given backend addresses.
-func NewServerPool(addrs []string) *ServerPool {
+// NewServerPoolFromMap initializes a pool from a map[address]weight.
+func NewServerPoolFromMap(addrs map[string]int) *ServerPool {
 	sp := &ServerPool{
 		backends: make(map[string]*Backend, len(addrs)),
 	}
-	for _, a := range addrs {
-		sp.backends[a] = &Backend{Addr: a, Healthy: true}
+	for addr, w := range addrs {
+		if w <= 0 {
+			w = 1
+		}
+		sp.backends[addr] = &Backend{Addr: addr, Weight: w, Healthy: true}
 	}
 	return sp
 }
 
-// AddServer adds a new backend to the pool and marks it healthy.
-func (sp *ServerPool) AddServer(addr string) {
+// NewServerPool (backwards compatible) - sets all weights to 1
+func NewServerPool(addrs []string) *ServerPool {
+	m := make(map[string]int, len(addrs))
+	for _, a := range addrs {
+		m[a] = 1
+	}
+	return NewServerPoolFromMap(m)
+}
+
+// AddServerWithWeight adds a backend with given weight.
+func (sp *ServerPool) AddServerWithWeight(addr string, weight int) {
+	if weight <= 0 {
+		weight = 1
+	}
 	sp.mu.Lock()
 	defer sp.mu.Unlock()
-	sp.backends[addr] = &Backend{Addr: addr, Healthy: true}
+	sp.backends[addr] = &Backend{Addr: addr, Weight: weight, Healthy: true}
 }
 
 // RemoveServer removes a backend from the pool.
@@ -74,7 +86,6 @@ func (sp *ServerPool) MarkHealth(addr string, healthy bool) {
 }
 
 // GetServers returns a copy of all backends with health state.
-// Useful for health checker iteration.
 func (sp *ServerPool) GetServers() map[string]bool {
 	sp.mu.RLock()
 	defer sp.mu.RUnlock()
@@ -85,7 +96,7 @@ func (sp *ServerPool) GetServers() map[string]bool {
 	return copy
 }
 
-// HealthyBackends returns a slice of addresses for currently healthy backends.
+// HealthyBackends returns addresses of healthy backends.
 func (sp *ServerPool) HealthyBackends() []string {
 	sp.mu.RLock()
 	defer sp.mu.RUnlock()
@@ -138,6 +149,61 @@ func (sp *ServerPool) IncActive(addr string) {
 		b.incActive()
 	} else {
 		// optional: log unknown addr
+		fmt.Printf("IncActive: unknown backend %s\n", addr)
+	}
+}
+
+// DecActive decrements the active counter for a backend address.
+func (sp *ServerPool) DecActive(addr string) {
+	sp.mu.RLock()
+	b, ok := sp.backends[addr]
+	sp.mu.RUnlock()
+	if ok {
+		b.decActive()
+	} else {
+		fmt.Printf("DecActive: unknown backend %s\n", addr)
+	}
+}
+
+// GetWeightedBackend selects a healthy backend according to weights.
+// Returns addr and true, or "", false if none available.
+func (sp *ServerPool) GetWeightedBackend() (string, bool) {
+	// compute total weight
+	total := sp.totalWeight()
+	if total == 0 {
+		return "", false
+	}
+
+	// increment atomic counter (lock-free)
+	idx := atomic.AddUint64(&sp.weightCounter, 1)
+	mod := int((idx - 1) % uint64(total)) // 0-based position in weight space
+
+	// iterate healthy backends and find which weight bucket contains mod
+	sp.mu.RLock()
+	defer sp.mu.RUnlock()
+
+	cum := 0
+	for _, b := range sp.backends {
+		if !b.Healthy {
+			continue
+		}
+		cum += b.Weight
+		if mod < cum {
+			return b.Addr, true
+		}
+	}
+	// should never reach here if total>0, but return fallback
+	return "", false
+}
+
+// IncActive increments the active counter for a backend address.
+func (sp *ServerPool) IncActive(addr string) {
+	sp.mu.RLock()
+	b, ok := sp.backends[addr]
+	sp.mu.RUnlock()
+	if ok {
+		b.incActive()
+	} else {
 		fmt.Printf("IncActive: unknown backend %s\n", addr)
 	}
 }
